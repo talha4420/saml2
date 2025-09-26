@@ -1,0 +1,14 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "msbuild",
+			"problemMatcher": [
+				"$msCompile"
+			],
+			"group": "build",
+			"label": "Build: Saml2Assertion.csproj",
+			"detail": "Build the Saml2Assertion.csproj project using dotnet build"
+		}
+	]
+}

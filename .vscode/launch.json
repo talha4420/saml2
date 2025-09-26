@@ -1,0 +1,19 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Saml2Assertion (.NET)",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "Build: Saml2Assertion.csproj",
+            "program": "${workspaceFolder}/Saml2Assertion/bin/Debug/net9.0/Saml2Assertion.dll",
+            "args": [],
+            "cwd": "${workspaceFolder}/Saml2Assertion",
+            "console": "integratedTerminal",
+            "stopAtEntry": false
+        }
+    ]
+}
