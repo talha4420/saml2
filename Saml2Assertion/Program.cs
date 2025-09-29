@@ -1,4 +1,5 @@
-﻿using Saml2Assertion.Adapters;
+﻿using System.Security.Claims;
+using Saml2Assertion.Adapters;
 using Saml2Assertion.Adapters.Itfoxtec;
 using Saml2Assertion.Adapters.MicrosoftIdentity;
 using Saml2Assertion.Infrastructure;
@@ -24,21 +25,33 @@ var baseRequest = new SamlAssertionRequest
 
 var adapters = new (string Label, ISamlAssertionAdapter Adapter)[]
 {
-	//("ITfoxtec", new ItfoxtecSamlAssertionAdapter()),
+	("ITfoxtec", new ItfoxtecSamlAssertionAdapter()),
 	("Microsoft.IdentityModel", new MicrosoftIdentitySamlAssertionAdapter()),
 };
 
-foreach (var (label, adapter) in adapters)
+var scenarios = new (string Label, SamlClaimsRoute Route, bool ProvideIdentity)[]
 {
-	Console.WriteLine($"Creating SAML 2.0 Authn response using {label} adapter...\n");
+	("Claims route (ClaimsIdentity provided)", SamlClaimsRoute.ClaimsIdentity, true),
+	("Direct route", SamlClaimsRoute.DirectAssertion, false),
+	("Direct route with ClaimsIdentity override", SamlClaimsRoute.DirectAssertion, true),
+};
 
-	var response = adapter.BuildAuthnResponse(baseRequest with
+foreach (var (adapterLabel, adapter) in adapters)
+{
+	foreach (var (scenarioLabel, route, provideIdentity) in scenarios)
 	{
-		RelayState = Guid.NewGuid().ToString("N")
-	});
+		Console.WriteLine($"Creating SAML 2.0 Authn response using {adapterLabel} adapter via {scenarioLabel}...\n");
 
-	ForwardToAcs(label, response);
-	Console.WriteLine(new string('-', 80));
+		var response = adapter.BuildAuthnResponse(baseRequest with
+		{
+			RelayState = Guid.NewGuid().ToString("N"),
+			ClaimsRoute = route,
+			ClaimsIdentity = provideIdentity ? CreateDemoClaimsIdentity() : null,
+		});
+
+		ForwardToAcs($"{adapterLabel} - {scenarioLabel}", response);
+		Console.WriteLine(new string('-', 80));
+	}
 }
 
 static void ForwardToAcs(string label, SamlAssertionResult result)
@@ -55,4 +68,15 @@ static void ForwardToAcs(string label, SamlAssertionResult result)
 		Console.WriteLine($" - {attribute.Name}: {string.Join(", ", attribute.Values)}");
 	}
 	Console.WriteLine();
+}
+
+ClaimsIdentity CreateDemoClaimsIdentity()
+{
+	var identity = new ClaimsIdentity("CustomClaims", ClaimTypes.Name, ClaimTypes.Role);
+	identity.AddClaim(new Claim(ClaimTypes.GivenName, "Alicia"));
+	identity.AddClaim(new Claim(ClaimTypes.Surname, "Keys"));
+	identity.AddClaim(new Claim(ClaimTypes.Email, "user@example.com"));
+	identity.AddClaim(new Claim("role", "Producer"));
+	identity.AddClaim(new Claim("department", "Music"));
+	return identity;
 }
