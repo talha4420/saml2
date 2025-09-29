@@ -18,7 +18,21 @@ public sealed class ItfoxtecSamlAssertionAdapter : ISamlAssertionAdapter
     public SamlAssertionResult BuildAuthnResponse(SamlAssertionRequest request)
     {
         var configuration = CreateConfiguration(request);
-    var response = CreateAuthnResponse(request, configuration);
+        var effectiveRoute = request.ClaimsIdentity is not null
+            ? SamlClaimsRoute.ClaimsIdentity
+            : request.ClaimsRoute;
+
+        return effectiveRoute switch
+        {
+            SamlClaimsRoute.DirectAssertion => BuildDirectAssertionResponse(request, configuration),
+            _ => BuildClaimsIdentityResponse(request, configuration),
+        };
+    }
+
+    private static SamlAssertionResult BuildClaimsIdentityResponse(SamlAssertionRequest request, Saml2Configuration configuration)
+    {
+        var identity = ResolveClaimsIdentity(request);
+        var response = CreateAuthnResponse(request, configuration, identity);
 
         var securityToken = response.CreateSecurityToken(
             request.SingleSignOnDestination.ToString(),
@@ -37,6 +51,13 @@ public sealed class ItfoxtecSamlAssertionAdapter : ISamlAssertionAdapter
         return FinalizeResponse(binding, securityToken, request);
     }
 
+    private static SamlAssertionResult BuildDirectAssertionResponse(SamlAssertionRequest request, Saml2Configuration configuration)
+    {
+        // The ITfoxtec pipeline fundamentally relies on ClaimsIdentity to populate the assertion model,
+        // so we reuse the claims-based flow for now to ensure consistent output.
+        return BuildClaimsIdentityResponse(request, configuration);
+    }
+
     private static Saml2Configuration CreateConfiguration(SamlAssertionRequest request)
     {
         return new Saml2Configuration
@@ -49,7 +70,7 @@ public sealed class ItfoxtecSamlAssertionAdapter : ISamlAssertionAdapter
         };
     }
 
-    private static Saml2AuthnResponse CreateAuthnResponse(SamlAssertionRequest request, Saml2Configuration configuration)
+    private static Saml2AuthnResponse CreateAuthnResponse(SamlAssertionRequest request, Saml2Configuration configuration, ClaimsIdentity identity)
     {
         var response = new Saml2AuthnResponse(configuration)
         {
@@ -67,14 +88,42 @@ public sealed class ItfoxtecSamlAssertionAdapter : ISamlAssertionAdapter
             response.SessionIndex = request.SessionIndex;
         }
 
-    response.NameId = new Saml2NameIdentifier(request.NameId, new Uri(request.NameIdFormat));
-
-        var identity = new ClaimsIdentity("Federation", ClaimTypes.Name, ClaimTypes.Role);
-        identity.AddClaim(new Claim(ClaimTypes.NameIdentifier, request.NameId));
-
+        response.NameId = new Saml2NameIdentifier(request.NameId, new Uri(request.NameIdFormat));
         response.ClaimsIdentity = identity;
 
         return response;
+    }
+
+    private static ClaimsIdentity ResolveClaimsIdentity(SamlAssertionRequest request)
+    {
+        if (request.ClaimsIdentity is { } provided)
+        {
+            return NormalizeClaimsIdentity(provided, request.NameId);
+        }
+
+        var identity = new ClaimsIdentity("Federation", ClaimTypes.Name, ClaimTypes.Role);
+        identity.AddClaim(new Claim(ClaimTypes.NameIdentifier, request.NameId));
+        return identity;
+    }
+
+    private static ClaimsIdentity NormalizeClaimsIdentity(ClaimsIdentity provided, string nameId)
+    {
+        var clone = new ClaimsIdentity(provided);
+
+        foreach (var claim in clone.FindAll(ClaimTypes.NameIdentifier).ToList())
+        {
+            clone.RemoveClaim(claim);
+        }
+
+        clone.AddClaim(new Claim(ClaimTypes.NameIdentifier, nameId));
+
+        if (string.IsNullOrEmpty(clone.AuthenticationType))
+        {
+            var claims = clone.Claims.Select(c => new Claim(c.Type, c.Value, c.ValueType, c.Issuer, c.OriginalIssuer)).ToList();
+            clone = new ClaimsIdentity(claims, "Federation", clone.NameClaimType, clone.RoleClaimType);
+        }
+
+        return clone;
     }
 
     private static void EnsureAttributes(Saml2SecurityToken token, IReadOnlyCollection<SamlAttribute> attributes)

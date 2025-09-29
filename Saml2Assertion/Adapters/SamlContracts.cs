@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using Microsoft.IdentityModel.Tokens;
+using System.Security.Claims;
 using System.Security.Cryptography.X509Certificates;
 
 namespace Saml2Assertion.Adapters;
@@ -39,6 +40,8 @@ public sealed record SamlAssertionRequest
 
     public string? SessionIndex { get; init; }
 
+    public SamlClaimsRoute ClaimsRoute { get; init; } = SamlClaimsRoute.ClaimsIdentity;
+
     public Uri AuthnContext { get; init; } = new("urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport");
 
     public int SubjectConfirmationLifetimeMinutes { get; init; } = 10;
@@ -47,7 +50,18 @@ public sealed record SamlAssertionRequest
 
     public IReadOnlyCollection<SamlAttribute> Attributes { get; init; } = Array.Empty<SamlAttribute>();
 
+    public ClaimsIdentity? ClaimsIdentity { get; init; }
+
     public const string DefaultNameIdFormat = "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified";
+}
+
+/// <summary>
+/// Indicates which construction route an adapter should use when building the SAML response.
+/// </summary>
+public enum SamlClaimsRoute
+{
+    ClaimsIdentity,
+    DirectAssertion
 }
 
 /// <summary>

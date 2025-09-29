@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Security.Claims;
 using System.Security.Cryptography.X509Certificates;
 using System.Security.Cryptography.Xml;
 using System.Text;
@@ -25,7 +26,20 @@ public sealed class MicrosoftIdentitySamlAssertionAdapter : ISamlAssertionAdapte
 
         var utcNow = DateTime.UtcNow;
 
-        var assertion = CreateAssertion(request, utcNow);
+        var effectiveRoute = request.ClaimsIdentity is not null
+            ? SamlClaimsRoute.ClaimsIdentity
+            : request.ClaimsRoute;
+
+        return effectiveRoute switch
+        {
+            SamlClaimsRoute.ClaimsIdentity => BuildWithClaimsIdentity(request, utcNow),
+            _ => BuildWithDirectAssertion(request, utcNow),
+        };
+    }
+
+    private static SamlAssertionResult BuildWithDirectAssertion(SamlAssertionRequest request, DateTime utcNow)
+    {
+        var assertion = CreateAssertion(request, utcNow, request.Attributes);
         var securityToken = CreateSecurityToken(assertion, request);
         var responseXml = CreateResponseXml(request, securityToken, utcNow);
         var base64Response = Convert.ToBase64String(Encoding.UTF8.GetBytes(responseXml));
@@ -39,7 +53,27 @@ public sealed class MicrosoftIdentitySamlAssertionAdapter : ISamlAssertionAdapte
             request.Attributes);
     }
 
-    private static Saml2.Saml2Assertion CreateAssertion(SamlAssertionRequest request, DateTime utcNow)
+    private static SamlAssertionResult BuildWithClaimsIdentity(SamlAssertionRequest request, DateTime utcNow)
+    {
+        var identity = ResolveClaimsIdentity(request);
+        var identityAttributes = ExtractAttributes(identity);
+        var attributes = MergeAttributes(identityAttributes, request.Attributes);
+
+        var assertion = CreateAssertion(request, utcNow, attributes);
+        var securityToken = CreateSecurityToken(assertion, request);
+        var responseXml = CreateResponseXml(request, securityToken, utcNow);
+        var base64Response = Convert.ToBase64String(Encoding.UTF8.GetBytes(responseXml));
+        var postContent = BuildPostContent(request.SingleSignOnDestination, base64Response, request.RelayState);
+
+        return new SamlAssertionResult(
+            request.SingleSignOnDestination.ToString(),
+            request.RelayState,
+            postContent,
+            securityToken,
+            attributes);
+    }
+
+    private static Saml2.Saml2Assertion CreateAssertion(SamlAssertionRequest request, DateTime utcNow, IReadOnlyCollection<SamlAttribute> attributes)
     {
         var assertion = new Saml2.Saml2Assertion(new Saml2.Saml2NameIdentifier(request.Issuer))
         {
@@ -50,7 +84,7 @@ public sealed class MicrosoftIdentitySamlAssertionAdapter : ISamlAssertionAdapte
 
         assertion.Statements.Add(CreateAuthnStatement(request, utcNow));
 
-        var attributeStatement = CreateAttributeStatement(request.Attributes);
+        var attributeStatement = CreateAttributeStatement(attributes);
         if (attributeStatement is not null)
         {
             assertion.Statements.Add(attributeStatement);
@@ -189,6 +223,117 @@ public sealed class MicrosoftIdentitySamlAssertionAdapter : ISamlAssertionAdapte
         }
 
         return builder.ToString();
+    }
+    private static IReadOnlyCollection<SamlAttribute> ExtractAttributes(ClaimsIdentity identity)
+    {
+        var attributes = identity.Claims
+            .Where(claim => claim.Type != ClaimTypes.NameIdentifier)
+            .GroupBy(claim => claim.Type)
+            .Select(group => new SamlAttribute(group.Key, group.Select(claim => claim.Value).ToArray()))
+            .ToArray();
+
+        return attributes.Length == 0
+            ? Array.Empty<SamlAttribute>()
+            : attributes;
+    }
+
+    private static ClaimsIdentity ResolveClaimsIdentity(SamlAssertionRequest request)
+    {
+        if (request.ClaimsIdentity is { } provided)
+        {
+            return NormalizeClaimsIdentity(provided, request.NameId, request.Attributes);
+        }
+
+        var identity = new ClaimsIdentity("SAML", ClaimTypes.Name, ClaimTypes.Role);
+        identity.AddClaim(new Claim(ClaimTypes.NameIdentifier, request.NameId));
+        AddAttributesAsClaims(identity, request.Attributes);
+
+        return identity;
+    }
+
+    private static ClaimsIdentity NormalizeClaimsIdentity(ClaimsIdentity provided, string nameId, IReadOnlyCollection<SamlAttribute> attributes)
+    {
+        var clone = new ClaimsIdentity(provided);
+
+        foreach (var claim in clone.FindAll(ClaimTypes.NameIdentifier).ToList())
+        {
+            clone.RemoveClaim(claim);
+        }
+
+        clone.AddClaim(new Claim(ClaimTypes.NameIdentifier, nameId));
+        AddAttributesAsClaims(clone, attributes);
+
+        if (string.IsNullOrEmpty(clone.AuthenticationType))
+        {
+            var claims = clone.Claims.Select(c => new Claim(c.Type, c.Value, c.ValueType, c.Issuer, c.OriginalIssuer)).ToList();
+            clone = new ClaimsIdentity(claims, "SAML", clone.NameClaimType, clone.RoleClaimType);
+        }
+
+        return clone;
+    }
+
+    private static void AddAttributesAsClaims(ClaimsIdentity identity, IReadOnlyCollection<SamlAttribute> attributes)
+    {
+        if (attributes.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var attribute in attributes)
+        {
+            foreach (var value in attribute.Values)
+            {
+                if (!identity.Claims.Any(claim => claim.Type == attribute.Name && claim.Value == value))
+                {
+                    identity.AddClaim(new Claim(attribute.Name, value));
+                }
+            }
+        }
+    }
+
+    private static IReadOnlyCollection<SamlAttribute> MergeAttributes(IReadOnlyCollection<SamlAttribute> identityAttributes, IReadOnlyCollection<SamlAttribute> additionalAttributes)
+    {
+        if (additionalAttributes.Count == 0)
+        {
+            return identityAttributes;
+        }
+
+        var attributes = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var order = new List<string>();
+
+        foreach (var attribute in identityAttributes)
+        {
+            if (!attributes.TryGetValue(attribute.Name, out var values))
+            {
+                values = new List<string>();
+                attributes.Add(attribute.Name, values);
+                order.Add(attribute.Name);
+            }
+
+            values.AddRange(attribute.Values);
+        }
+
+        foreach (var attribute in additionalAttributes)
+        {
+            if (!attributes.TryGetValue(attribute.Name, out var values))
+            {
+                values = new List<string>();
+                attributes.Add(attribute.Name, values);
+                order.Add(attribute.Name);
+            }
+
+            foreach (var value in attribute.Values)
+            {
+                if (!values.Contains(value))
+                {
+                    values.Add(value);
+                }
+            }
+        }
+
+        return order
+            .Select(name => new SamlAttribute(name, attributes[name].ToArray()))
+            .ToArray();
     }
 
     private static string SignResponseXml(string responseXml, X509Certificate2 signingCertificate)
